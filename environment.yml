@@ -1,0 +1,14 @@
+name: Inverse-Kinematics-Prediction
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python
+  - pandas
+  - numpy
+  - requests
+  - matplotlib
+  - pytorch
+  - scikit-learn
+  - ipykernel
