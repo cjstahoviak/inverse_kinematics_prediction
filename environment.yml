@@ -12,3 +12,6 @@ dependencies:
   - pytorch
   - scikit-learn
   - ipykernel
+  - plotly
+  - seaborn
+  - nbformat>=4.2.0

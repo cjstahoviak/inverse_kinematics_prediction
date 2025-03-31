@@ -1,7 +1,7 @@
 import numpy as np
 
 class RobotArm:
-    def __init__(self, num_joints, joint_limits, link_lengths):
+    def __init__(self, num_joints, joint_limits, link_lengths, rotation_axes, link_axes):
         """
         Initialize the robot arm.
         
@@ -9,8 +9,13 @@ class RobotArm:
           num_joints (int): Number of revolute joints.
           joint_limits (list of tuples): Each tuple (min, max) defines the limits (radians) for a joint.
           link_lengths (list of floats): Lengths for each link; must have num_joints+1 elements.
+          rotation_axes (list of str): Rotation axis for each joint. Each entry should be 'x', 'y', or 'z'.
+                                       (Length must equal num_joints.)
+          link_axes (list of str): Translation axis for each link. Each entry should be 'x', 'y', or 'z'.
+                                   (Length must equal num_joints+1.)
         """
         self.num_joints = num_joints
+        
         if len(joint_limits) != num_joints:
             raise ValueError("joint_limits must have length equal to num_joints.")
         self.joint_limits = joint_limits
@@ -18,6 +23,34 @@ class RobotArm:
         if len(link_lengths) != num_joints + 1:
             raise ValueError("link_lengths must have num_joints + 1 elements.")
         self.link_lengths = link_lengths
+        
+        if len(rotation_axes) != num_joints:
+            raise ValueError("rotation_axes must have length equal to num_joints.")
+        self.rotation_axes = rotation_axes
+        
+        if len(link_axes) != num_joints + 1:
+            raise ValueError("link_axes must have length equal to num_joints + 1.")
+        self.link_axes = link_axes
+
+    @staticmethod
+    def _rotx(theta):
+        """Return a homogeneous rotation matrix about the x-axis by angle theta (radians)."""
+        return np.array([
+            [1, 0, 0, 0],
+            [0, np.cos(theta), -np.sin(theta), 0],
+            [0, np.sin(theta), np.cos(theta), 0],
+            [0, 0, 0, 1]
+        ])
+
+    @staticmethod
+    def _roty(theta):
+        """Return a homogeneous rotation matrix about the y-axis by angle theta (radians)."""
+        return np.array([
+            [ np.cos(theta), 0, np.sin(theta), 0],
+            [ 0,             1, 0,             0],
+            [-np.sin(theta), 0, np.cos(theta), 0],
+            [ 0,             0, 0,             1]
+        ])
 
     @staticmethod
     def _rotz(theta):
@@ -30,15 +63,20 @@ class RobotArm:
         ])
     
     @staticmethod
-    def _roty(theta):
-        """Return a homogeneous rotation matrix about the y-axis by angle theta (radians)."""
-        return np.array([
-            [ np.cos(theta), 0, np.sin(theta), 0],
-            [ 0,             1, 0,             0],
-            [-np.sin(theta), 0, np.cos(theta), 0],
-            [ 0,             0, 0,             1]
-        ])
-    
+    def _rot(axis, radians):
+        """
+        Return a homogeneous rotation matrix about the specified axis by angle in radians.
+        """
+        axis = axis.lower()
+        if axis == 'x':
+            return RobotArm._rotx(radians)
+        elif axis == 'y':
+            return RobotArm._roty(radians)
+        elif axis == 'z':
+            return RobotArm._rotz(radians)
+        else:
+            raise ValueError("Invalid rotation axis. Must be 'x', 'y', or 'z'.")
+
     @staticmethod
     def _transx(x):
         """Return a homogeneous translation matrix along the x-axis by distance x."""
@@ -48,7 +86,42 @@ class RobotArm:
             [0, 0, 1, 0],
             [0, 0, 0, 1]
         ])
+
+    @staticmethod
+    def _transy(y):
+        """Return a homogeneous translation matrix along the y-axis by distance y."""
+        return np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, y],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+
+    @staticmethod
+    def _transz(z):
+        """Return a homogeneous translation matrix along the z-axis by distance z."""
+        return np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
     
+    @staticmethod
+    def _trans(axis, distance):
+        """
+        Return a homogeneous translation matrix along the specified axis by distance.
+        """
+        axis = axis.lower()
+        if axis == 'x':
+            return RobotArm._transx(distance)
+        elif axis == 'y':
+            return RobotArm._transy(distance)
+        elif axis == 'z':
+            return RobotArm._transz(distance)
+        else:
+            raise ValueError("Invalid translation axis. Must be 'x', 'y', or 'z'.")
+
     @staticmethod
     def _rotation_matrix_to_quaternion(R):
         """
@@ -83,16 +156,28 @@ class RobotArm:
                 q[2] = (R[1, 2] + R[2, 1]) / S
                 q[3] = 0.25 * S
         return q
+    
+    @staticmethod
+    def _quaternion_to_rotation_matrix(quat):
+        """
+        Convert a quaternion (in ROS format: (x, y, z, w)) to a 3x3 rotation matrix.
+        """
+        x, y, z, w = quat
+        R = np.array([
+            [1 - 2*(y**2 + z**2),   2*(x*y - z*w),       2*(x*z + y*w)],
+            [2*(x*y + z*w),         1 - 2*(x**2 + z**2), 2*(y*z - x*w)],
+            [2*(x*z - y*w),         2*(y*z + x*w),       1 - 2*(x**2 + y**2)]
+        ])
+        return R
 
     def forward_kinematics(self, joint_angles):
         """
         Compute the forward kinematics for the robot arm.
         
-        The computation follows a chain of transformations:
-          - For the first joint, a rotation about the z-axis is applied.
-          - For joints 2 through n, rotations about the y-axis are applied.
-          - After each joint rotation, a translation along the x-axis is applied using the corresponding link length.
-          - A final translation using the last link length is applied for the end-effector.
+        For each joint i, apply a rotation about the specified axis (from self.rotation_axes)
+        using the corresponding joint angle, then a translation along the specified link axis (from self.link_axes)
+        using the corresponding link length. After processing all joints, apply a final translation for the
+        end-effector link.
         
         Parameters:
           joint_angles (list or array): Joint angles (in radians) of length equal to num_joints.
@@ -104,26 +189,97 @@ class RobotArm:
         if len(joint_angles) != self.num_joints:
             raise ValueError("Length of joint_angles must equal the number of joints.")
         
-        # Initialize the transformation as the identity matrix.
         T = np.eye(4)
+        # Process each joint: apply the rotation then the translation along the corresponding link.
+        for i in range(self.num_joints):
+            # Apply joint rotation.
+            axis_rot = self.rotation_axes[i].lower()
+            theta = joint_angles[i]
+            T = T.dot(self._rot(axis_rot, theta))
+            
+            # Translate along the link specified by link_axes[i] using link_lengths[i].
+            axis_link = self.link_axes[i].lower()
+            length = self.link_lengths[i]
+            T = T.dot(self._trans(axis_link, length))
         
-        # Apply transformation for the first joint (rotate about z then translate)
-        T = T.dot(self._rotz(joint_angles[0])).dot(self._transx(self.link_lengths[0]))
+        # Apply final translation for the end-effector link.
+        final_axis = self.link_axes[-1].lower()
+        T = T.dot(self._trans(final_axis, self.link_lengths[-1]))
         
-        # Apply transformation for remaining joints (rotate about y then translate)
-        for i in range(1, self.num_joints):
-            T = T.dot(self._roty(joint_angles[i])).dot(self._transx(self.link_lengths[i]))
-        
-        # Apply the final translation for the end-effector link.
-        T = T.dot(self._transx(self.link_lengths[-1]))
-        
-        # Extract the position (translation part) from the transformation matrix.
         position = T[0:3, 3]
-        
-        # Extract the rotation matrix and convert it to a quaternion.
         R = T[0:3, 0:3]
         quat = self._rotation_matrix_to_quaternion(R)
-        # Reorder to ROS standard (x, y, z, w)
+        # Convert from [w, x, y, z] to ROS standard (x, y, z, w)
         quaternion_ros = (quat[1], quat[2], quat[3], quat[0])
-        
         return position, quaternion_ros
+    
+    def get_joint_poses(self, joint_angles):
+        """
+        Compute and return the 3D poses (position and orientation) of the base, each intermediate joint,
+        and the end-effector for the given joint angles.
+        
+        Parameters:
+        joint_angles (list or np.ndarray): Joint angles (in radians) with length equal to num_joints.
+        
+        Returns:
+        poses (list of tuples): Each element is a tuple (position, quaternion), where:
+            - position is an np.ndarray of shape (3,) representing the 3D coordinates.
+            - quaternion is a tuple (x, y, z, w) representing the orientation in ROS format.
+            The list includes the base, each joint, and the end-effector.
+        """
+        if len(joint_angles) != self.num_joints:
+            raise ValueError("Length of joint_angles must equal the number of joints.")
+        
+        poses = []
+        # Start with the base pose (T is identity).
+        T = np.eye(4)
+        base_pos = T[:3, 3].copy()
+        base_R = T[:3, :3]
+        base_quat = self._rotation_matrix_to_quaternion(base_R)
+        base_quat_ros = (base_quat[1], base_quat[2], base_quat[3], base_quat[0])
+        poses.append((base_pos, base_quat_ros))
+        
+        # Process each joint.
+        for i in range(self.num_joints):
+            # Apply joint rotation.
+            axis_rot = self.rotation_axes[i].lower()
+            theta = joint_angles[i]
+            if axis_rot == 'x':
+                T = T.dot(self._rotx(theta))
+            elif axis_rot == 'y':
+                T = T.dot(self._roty(theta))
+            elif axis_rot == 'z':
+                T = T.dot(self._rotz(theta))
+            else:
+                raise ValueError("Invalid rotation axis. Must be 'x', 'y', or 'z'.")
+            
+            # Translate along the corresponding link.
+            axis_link = self.link_axes[i].lower()
+            T = T.dot(self._trans(axis_link, self.link_lengths[i]))
+            
+            # Record the pose at this joint.
+            pos = T[:3, 3].copy()
+            R = T[:3, :3]
+            quat = self._rotation_matrix_to_quaternion(R)
+            quat_ros = (quat[1], quat[2], quat[3], quat[0])
+            poses.append((pos, quat_ros))
+        
+        # Apply the final translation for the end-effector.
+        final_axis = self.link_axes[-1].lower()
+        T = T.dot(self._trans(final_axis, self.link_lengths[-1]))
+        pos = T[:3, 3].copy()
+        R = T[:3, :3]
+        quat = self._rotation_matrix_to_quaternion(R)
+        quat_ros = (quat[1], quat[2], quat[3], quat[0])
+        poses.append((pos, quat_ros))
+        
+        return poses
+    
+    def sample_random_joint_angles(self):
+        """
+        Return a random set of joint angles within their respective limits.
+        
+        Returns:
+          np.ndarray: An array of random joint angles with shape (num_joints,).
+        """
+        return np.array([np.random.uniform(low, high) for (low, high) in self.joint_limits])
