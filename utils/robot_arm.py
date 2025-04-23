@@ -174,35 +174,42 @@ class RobotArm:
         """
         Compute the forward kinematics for the robot arm.
         
-        For each joint i, apply a rotation about the specified axis (from self.rotation_axes)
-        using the corresponding joint angle, then a translation along the specified link axis (from self.link_axes)
-        using the corresponding link length. After processing all joints, apply a final translation for the
-        end-effector link.
+        For each joint i, apply a translation along the specified link axis (from self.link_axes)
+        using the corresponding link length, then apply a rotation about the specified axis
+        (from self.rotation_axes) using the corresponding joint angle. After processing all joints,
+        apply a final translation for the end-effector link.
         
         Parameters:
-          joint_angles (list or array): Joint angles (in radians) of length equal to num_joints.
+        joint_angles (list or array): Joint angles (in radians) of length equal to num_joints.
         
         Returns:
-          position (numpy array): [x, y, z] position of the end effector.
-          quaternion (tuple): Orientation of the end effector as (x, y, z, w) in ROS format.
+        position (numpy array): [x, y, z] position of the end effector.
+        quaternion (tuple): Orientation of the end effector as (x, y, z, w) in ROS format.
         """
         if len(joint_angles) != self.num_joints:
             raise ValueError("Length of joint_angles must equal the number of joints.")
         
         T = np.eye(4)
-        # Process each joint: apply the rotation then the translation along the corresponding link.
+        
+        # Translate along the first link (base to first joint)
+        axis_link = self.link_axes[0].lower()
+        length = self.link_lengths[0]
+        T = T.dot(self._trans(axis_link, length))
+        
+        # Process each joint
         for i in range(self.num_joints):
-            # Apply joint rotation.
+            # Apply joint rotation
             axis_rot = self.rotation_axes[i].lower()
             theta = joint_angles[i]
             T = T.dot(self._rot(axis_rot, theta))
             
-            # Translate along the link specified by link_axes[i] using link_lengths[i].
-            axis_link = self.link_axes[i].lower()
-            length = self.link_lengths[i]
-            T = T.dot(self._trans(axis_link, length))
+            # If not the last joint, translate to the next joint
+            if i < self.num_joints - 1:
+                axis_link = self.link_axes[i+1].lower()
+                length = self.link_lengths[i+1]
+                T = T.dot(self._trans(axis_link, length))
         
-        # Apply final translation for the end-effector link.
+        # Apply final translation for the end-effector link
         final_axis = self.link_axes[-1].lower()
         T = T.dot(self._trans(final_axis, self.link_lengths[-1]))
         
@@ -239,30 +246,35 @@ class RobotArm:
         base_quat_ros = (base_quat[1], base_quat[2], base_quat[3], base_quat[0])
         poses.append((base_pos, base_quat_ros))
         
-        # Process each joint.
+        # Translate to the first joint position
+        axis_link = self.link_axes[0].lower()
+        T = T.dot(self._trans(axis_link, self.link_lengths[0]))
+        
+        # Record the position of the first joint (before any rotation)
+        first_joint_pos = T[:3, 3].copy()
+        first_joint_R = T[:3, :3]
+        first_joint_quat = self._rotation_matrix_to_quaternion(first_joint_R)
+        first_joint_quat_ros = (first_joint_quat[1], first_joint_quat[2], first_joint_quat[3], first_joint_quat[0])
+        poses.append((first_joint_pos, first_joint_quat_ros))
+        
+        # Process each joint and subsequent link.
         for i in range(self.num_joints):
             # Apply joint rotation.
             axis_rot = self.rotation_axes[i].lower()
             theta = joint_angles[i]
-            if axis_rot == 'x':
-                T = T.dot(self._rotx(theta))
-            elif axis_rot == 'y':
-                T = T.dot(self._roty(theta))
-            elif axis_rot == 'z':
-                T = T.dot(self._rotz(theta))
-            else:
-                raise ValueError("Invalid rotation axis. Must be 'x', 'y', or 'z'.")
+            T = T.dot(self._rot(axis_rot, theta))
             
-            # Translate along the corresponding link.
-            axis_link = self.link_axes[i].lower()
-            T = T.dot(self._trans(axis_link, self.link_lengths[i]))
-            
-            # Record the pose at this joint.
-            pos = T[:3, 3].copy()
-            R = T[:3, :3]
-            quat = self._rotation_matrix_to_quaternion(R)
-            quat_ros = (quat[1], quat[2], quat[3], quat[0])
-            poses.append((pos, quat_ros))
+            # If not the last joint, translate to the next joint
+            if i < self.num_joints - 1:
+                axis_link = self.link_axes[i+1].lower()
+                T = T.dot(self._trans(axis_link, self.link_lengths[i+1]))
+                
+                # Record the pose at this joint.
+                pos = T[:3, 3].copy()
+                R = T[:3, :3]
+                quat = self._rotation_matrix_to_quaternion(R)
+                quat_ros = (quat[1], quat[2], quat[3], quat[0])
+                poses.append((pos, quat_ros))
         
         # Apply the final translation for the end-effector.
         final_axis = self.link_axes[-1].lower()
